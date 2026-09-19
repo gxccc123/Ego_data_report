@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="第一视角视频三维手部轨迹重建技术报告：HaWoR、相机尺度、跨片段拼接、质量检查、案例分析与数据交付。">
+  <meta name="theme-color" content="#ffffff">
+  <title>三维手部轨迹重建 · 技术报告</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="assets/production-data.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#report">跳到正文</a>
+<header class="topbar"><div class="topbar-inner"><a href="#intro" class="site-name">Ego Hand Reconstruction</a><span class="topbar-right"><span>技术报告 · 中文</span><a href="https://github.com/gxccc123/Ego_data_report">GitHub ↗</a></span><button class="menu-toggle" aria-expanded="false" aria-controls="toc">目录</button></div></header>
+<div class="report-layout">
+<aside class="sidebar"><nav id="toc" aria-label="报告目录"><p class="toc-label">本文目录</p>
+  <a href="#intro">导读与结论</a>
+  <a href="#task">1. 任务与数据边界</a>
+  <a href="#pipeline">2. 完整标注流程</a>
+  <a class="sub" href="#input">2.1 输入、时间轴与标定</a>
+  <a class="sub" href="#hand">2.2 HaWoR / MANO 手部</a>
+  <a class="sub" href="#camera">2.3 相机轨迹与尺度</a>
+  <a class="sub" href="#stitch">2.4 跨片段拼接</a>
+  <a class="sub" href="#world">2.5 世界坐标与误差传播</a>
+  <a class="sub" href="#quality">2.6 QC 与有限修复</a>
+  <a href="#evaluation">3. 如何评估</a>
+  <a href="#cases">4. 手部结果与案例</a>
+  <a href="#experiments">5. 相机与双目实验</a>
+  <a href="#production">6. 实际标注产物</a>
+  <a href="#delivery">7. 输出与数据交付</a>
+  <a href="#running">8. 运行与并行方式</a>
+  <a href="#conclusion">9. 结论与验证计划</a>
+  <a href="#references">实现与资料索引</a>
+</nav></aside>
+
+<main id="report">
+<section id="intro">
+  <p class="report-kicker">METHODS · EXPERIMENTS · DATA CONTRACT</p>
+  <h1>第一视角视频的三维手部轨迹重建</h1>
+  <p class="subtitle">从相机系手部估计到世界系轨迹：方法、误差分析与数据交付</p>
+  <p class="byline">技术整理：2026-09-19 · 实现基线：<code>3c58fd2</code> · 历史实验与产物回查分开记录</p>
+  <p>这条管线要解决的是：给定一段第一视角 RGB 视频，估计左右手逐帧的三维关节位置，并尽可能去除头戴相机运动带来的影响，生成能够与原视频、已有子任务标注对齐的手部几何资产。它不是重新人工标注动作文本，也不直接生成某种机器人的关节控制指令。</p>
+  <p>难点不只是“在画面中找到手”。单目手部模型需要估计不可直接观测的深度；相机轨迹需要恢复尺度；独立运行的短片段需要对齐；输出中还会保留漏检、遮挡、身份切换和跳变。本文先按实际调用链解释处理过程，再用已有定量记录与失败案例说明：当前产物能支持什么，哪些问题仍不能由一次成功运行来证明。</p>
+  <div class="summary"><h2>核心结论</h2><ul>
+    <li><strong>当前主线：</strong>RGB / 内参 → HaWoR 相机系手部 → 手部 mask + DROID-SLAM → Metric3D 尺度恢复 → 重叠片段拼接 → 世界坐标变换 → QC / 有限修复 → NPZ。</li>
+    <li><strong>能力边界：</strong>沿用 HaWoR 的估计核心，增加数据适配、调度、标准化与交付机制；推荐流程跳过 infiller，不执行 world-space smoothing。不能视为完整官方流程的原样运行。</li>
+    <li><strong>已有证据：</strong>历史单序列的关节误差中位数为 60.7 mm，最好右手样例为 9.1 mm，但最差可达 391.4 mm。有效帧覆盖和几何精度必须分开报告。</li>
+    <li><strong>交付目标：</strong>与视频可对齐的 <code>hand_joints_3d.npz</code>、质量报告、来源信息及 1–2 个可视化样例；通过现有 converter 再进入训练格式。两份回查的 CaptainCook4D 产物均仍为 <code>warning / review</code>。</li>
+  </ul></div>
+  <p class="note">阅读口径：方法依据当前仓库源码；评测数字来自提供的《3D 手部轨迹重建》报告；生产案例来自 2026-08-11 产物、于 2026-09-19 回查。本次整理没有新增模型推理，也不声称全量数据已经完成或质量已验收。</p>
+</section>
+
+<section id="task">
+  <h2>1. 任务定义：补的是几何，不是再做一遍语义标注</h2>
+  <p>完整的人类操作训练样本通常需要三类信息：看到什么（视频观测）、在做什么（时间段及语言描述）、手如何移动（逐帧几何）。本项目承担第三项，并保留与前两项连接所需的时间轴和来源标识。</p>
+  <div class="table-wrap"><table><caption>表 1　数据对象及其在本流程中的作用</caption><thead><tr><th>对象</th><th>已有内容 / 用途</th><th>本流程的责任</th></tr></thead><tbody>
+    <tr><td><code>need_hand_pose.jsonl</code></td><td>有 subtask、缺手部信息的待处理清单；<code>source_id</code> 指向原数据</td><td>解析视频与标定，补手部几何；清单本身不是视频</td></tr>
+    <tr><td><code>need_both.jsonl</code></td><td>语义与手部信息都缺</td><td>只能补几何；还需单独的分段 / 语言标注流程</td></tr>
+    <tr><td>raw / processed 视频</td><td>RGB、可能存在的内参 / 畸变 / 相机轨迹，以及原始注释</td><td>读取和对齐；区分“真实标定”与“模型估计”</td></tr>
+    <tr><td><code>hand_asset/&lt;video_id&gt;.npz</code></td><td>本阶段面向 converter 的逐帧手部资产</td><td>固定坐标系、单位、关节顺序、有效性及视频映射</td></tr>
+    <tr><td>训练集 / LeRobot 等容器</td><td>视频、语言、state / action 和训练元数据</td><td>由下游 converter 生成；不能把复制 NPZ 等同于训练集转换</td></tr>
+  </tbody></table></div>
+  <h3>与 HaWoR、VITRA 的关系</h3>
+  <p><a href="https://hawor-project.github.io/">HaWoR</a> 本身面向第一视角视频的世界系手部运动重建，因此“手部 + 相机 + 世界坐标”并不是本工程新增的算法思想。我们复用其模型和相机估计部件，把它接入可恢复的数据生产流程。<a href="https://microsoft.github.io/VITRA/">VITRA</a> 的目标更广：把视频转成带原子任务片段、语言描述、手部和相机运动的 VLA 训练数据。这里的几何补标只是这类完整数据链路的一部分。</p>
+  <p>所以比较需要分层：<strong>工程可用性</strong>看多数据集适配、失败恢复和输出一致性；<strong>几何准确度</strong>看同样本、同帧掩码、同坐标协议的误差；<strong>训练价值</strong>看相同数据预算和训练设置下的下游收益。目前不能从工程步骤更多推出精度超过 HaWoR 或 VITRA，也不能用集合“真包含”准确描述几套系统的关系。</p>
+</section>
+
+<section id="pipeline">
+  <h2>2. 完整标注流程与关键实现</h2>
+  <p>以下以 <code>recipes/ego_hand_annotation_v1.yaml</code> 为推荐执行链。外层按视频切片，片段内先重建手，再利用手的几何生成动态区域 mask 来估计相机。片段级结果合并之后，才产生 episode 级的世界系手部轨迹。</p>
+  <figure class="flow-figure">
+    <ol class="pipeline-list">
+      <li><span>01</span><div><strong>输入准备与切片</strong><small>视频 + 相机 profile → 帧映射 / clip_frames / K</small></div></li>
+      <li><span>02</span><div><strong>HaWoR 手部重建</strong><small>检测 / 跟踪 → 时序回归 → MANO 参数与相机系几何</small></div></li>
+      <li><span>03</span><div><strong>Masked SLAM 与公制尺度估计</strong><small>手部 mesh → 动态 mask；DROID-SLAM + Metric3D → 相机轨迹</small></div></li>
+      <li><span>04</span><div><strong>重叠片段对齐与去重</strong><small>相机中心 Sim(3) 对齐；逐帧、逐手选择候选</small></div></li>
+      <li><span>05</span><div><strong>变换到 episode 世界系</strong><small>匹配源帧 / 时间戳；p<sub>w</sub> = R<sub>c2w</sub> p<sub>c</sub> + t<sub>c2w</sub></small></div></li>
+      <li><span>06</span><div><strong>QC → 有限修复 → 再次 QC → 导出</strong><small>保留异常、原始有效性及溯源信息，输出 (T, 2, 21, 3) 关节数组</small></div></li>
+    </ol>
+    <figcaption>图 1　当前推荐流程。第 3 步依赖第 2 步的手部结果，不能把两路视为完全独立、可任意并行的估计器。流程图不代表每个历史实验都使用这套 recipe。</figcaption>
+  </figure>
+  <div class="table-wrap"><table class="compact"><caption>表 2　仓库中三套 recipe 的关键差异</caption><thead><tr><th>Recipe</th><th>内参 / 预处理</th><th>后处理</th><th>导出 / 保留</th></tr></thead><tbody>
+    <tr><td><span class="implementation-ref" title="私有实现：recipes/ego_hand_annotation_v1.yaml"><code>ego_hand_annotation_v1</code></span><br>本文主线</td><td>materialize；dataset profile，缺失时停止</td><td>QC → 修复 → QC；无 smoothing</td><td>显式导出 NPZ；无 cleanup</td></tr>
+    <tr><td><span class="implementation-ref" title="私有实现：recipes/ego_3d_reconstruction_v1.yaml"><code>ego_3d_reconstruction_v1</code></span></td><td>包含 materialize / undistort / profile</td><td>包含 repair 与 smoothing</td><td>包含 export 和 cleanup</td></tr>
+    <tr><td><span class="implementation-ref" title="私有实现：recipes/ego_3d_reconstruction_v1_captaincook4d.yaml"><code>…_captaincook4d</code></span></td><td>profile 不足时 DroidCalib；需要已准备的 clip_frames</td><td>包含 smoothing、QC</td><td>文件本身无最终 export 步骤，且包含 cleanup</td></tr>
+  </tbody></table></div>
+  <p class="note">务必记录实际 recipe。旧 CaptainCook4D recipe 不能单独当成“从原视频到最终 NPZ”的完整入口；历史 wrapper / 补充步骤与新版主线也不能混为一谈。以下讲清已有实现，不代表此次修改了生产算法或运行配置。</p>
+
+  <section id="input">
+    <h3>2.1 输入、时间轴与相机标定</h3>
+    <p><code>import-ego-video</code> 探测视频的帧率、分辨率和帧数，生成 <code>episode.yaml</code> 与切片范围。默认片长 20 s、重叠 1 s；按 FPS 换算并四舍五入到整数帧；末段长度不超过 10 s 时合并到前段。片段端点是包含式帧号，而下游切片 / 数组通常采用左闭右开区间，转换时不能省略这层约定。</p>
+    <div class="equation"><span>L = round(20 · fps), O = round(1 · fps), stride = L − O</span><small>30 fps 示例：clip 0 为源帧 0–599，clip 1 从 570 开始；共同帧为 570–599。末段合并会改变最后一个片长。</small></div>
+    <p>要同时保留 <code>frame_indices</code>、<code>source_frame_indices</code> 与 <code>timestamps</code>。前者是结果时间轴，第二个是回到原视频的索引，时间戳用于跨流和语义区间对齐。不能因为各文件都是 30 fps，就假定它们从同一帧开始或没有丢帧。</p>
+    <p>内参写作 K = [[f<sub>x</sub>, 0, c<sub>x</sub>], [0, f<sub>y</sub>, c<sub>y</sub>], [0, 0, 1]]。它必须对应<strong>实际输入图像</strong>的分辨率、裁剪和去畸变状态。例如先从原图裁去左上偏移 (x<sub>0</sub>, y<sub>0</sub>)，再按 (a<sub>x</sub>, a<sub>y</sub>) 缩放，则新主点为 a<sub>x</sub>(c<sub>x</sub>−x<sub>0</sub>)、a<sub>y</sub>(c<sub>y</sub>−y<sub>0</sub>)，焦距分别乘相应比例。这是应满足的几何关系，不意味着每份旧数据都已自动正确处理。</p>
+    <p>推荐 recipe 使用准备好的 dataset profile；它没有隐式启用所有数据集的去畸变，也没有自动回退到 DroidCalib。CaptainCook4D 旧分支存在 <code>stride=2, num_images=80</code> 的 DroidCalib 估计入口，但<strong>估计出的内参不等于原厂标定</strong>。内参 K 也不是外参：外参描述相机之间或相机到世界的变换，本单目流程是在后面估计时变相机位姿。</p>
+    <p class="source-line">实现：<span class="implementation-ref" title="私有实现：src/data_pipeline/core/clip_split.py">clip_split.py</span> · <span class="implementation-ref" title="私有实现：src/data_pipeline/importers/ego_video.py">ego_video.py</span> · <span class="implementation-ref" title="私有实现：src/data_pipeline/dataset/profile_config.py">dataset profile</span></p>
+  </section>
+
+  <section id="hand">
+    <h3>2.2 HaWoR：从检测轨迹到 MANO 参数与三维关节</h3>
+    <p>手部阶段先检测、跟踪手并构造裁剪序列，再运行 HaWoR。模型不是直接独立回归 21 个三维点：它由图像特征和时序模块回归 MANO 手部参数、形状及相机相关量，再经参数化手模型产生关节与网格。这样能够约束手型，但并不能排除错误深度、错误手别或时序失效。</p>
+    <p>仓库中的 HaWoR 实现包含两类可配置的时序处理：<code>ST_MODULE</code> 将图像特征与归一化 bbox 信息拼接后做时序 attention；<code>MOTION_MODULE</code> 对预测姿态及 bbox 信息再做时序处理。网络代码按 16 帧组织这些模块，内部姿态使用 6D rotation，随后转换为旋转矩阵。它们是否启用取决于实际模型配置，不应只凭类定义判断。管线的 <code>hawor_motion_chunk_frames=64</code> 是另一层推理分块参数，和外层 20 s clip、模型内部 16 帧都不是同一个概念。</p>
+    <div class="table-wrap"><table class="compact"><caption>表 3　中间手部资产的主要表示（手优先布局）</caption><thead><tr><th>字段</th><th>形状</th><th>含义</th></tr></thead><tbody>
+      <tr><td><code>wrist_translation</code></td><td><code>(2,T,3)</code></td><td>实际腕点位置；不能直接与 MANO 模型平移互换</td></tr>
+      <tr><td><code>mano_translation</code></td><td><code>(2,T,3)</code></td><td>MANO 参数化模型的平移</td></tr>
+      <tr><td><code>wrist_orientation_axis_angle</code></td><td><code>(2,T,3)</code></td><td>腕 / 根旋转的轴角表示</td></tr>
+      <tr><td><code>hand_pose_axis_angle</code></td><td><code>(2,T,45)</code></td><td>15 个局部关节各 3 维轴角</td></tr>
+      <tr><td><code>betas</code></td><td><code>(2,T,10)</code></td><td>手型参数，不是动作向量</td></tr>
+      <tr><td><code>valid_mask</code></td><td><code>(2,T)</code></td><td>本阶段提供的逐手、逐帧有效性</td></tr>
+    </tbody></table></div>
+    <p>MANO 生成的关节经映射与指尖补点整理为 OpenPose-21。此时结果处于 <code>ego_camera_frame</code>：即使手在桌面上完全不动，只要相机转头或平移，手的相机系坐标也会变化。要得到空间运动，需要独立估计相机并做后续变换。</p>
+    <p><strong>一个重要的实际开关：</strong>主包装器显式附加 <code>--skip_infiller</code>。<code>demo_moge.py</code> 完成相机系手部结果后提前返回，独立的相机 step 随后执行。因此当前运行不包含官方 demo 后续的全部世界系 / infiller 处理，不能假设遮挡空洞已被学习式补全。<code>build_hand_masks=false</code> 则只是避免提前完整生成 mask；后续 SLAM 仍会按需渲染手部 mask。</p>
+    <p class="source-line">实现：<span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/hawor_common.py">命令包装器</span> · <span class="implementation-ref" title="私有实现：scripts/hawor/demo_moge.py">实际 demo 入口</span> · <a href="https://github.com/ThunderVVV/HaWoR/blob/66c7d4108d58a716deccd192cb7645170cdc7bd7/lib/models/hawor.py">HaWoR forward_step</a> · <span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/hawor_canonicalize.py">结果标准化</span></p>
+  </section>
+
+  <section id="camera">
+    <h3>2.3 相机轨迹：动态区域屏蔽与 Metric3D 尺度恢复</h3>
+    <p>相机阶段首先将 HaWoR 网格投影成手部 mask，再运行 masked DROID-SLAM，尽量避免运动手部破坏静态场景假设。mask 由 <code>HandCamSpaceMaskProvider</code> 按帧生成；手漏检会使动态区域残留，mask 太大又会损失背景特征。因此手部误差不仅影响最终关节，还可能沿这条依赖链影响相机估计。</p>
+    <p>单目 SLAM 的重建存在尺度不确定性：只用图像匹配不能独立确定物体究竟更大更远，还是更小更近。当前代码用关键帧上的 Metric3D 深度预测估计尺度，流程如下：</p>
+    <pre class="pseudocode"><code>traj, keyframes, disparity = masked_droid_slam(images, K, hand_masks)
+for k in keyframes:
+    depth_slam = 1 / disparity[k]
+    depth_metric = Metric3D(image[k], K)
+    scale[k] = est_scale_hybrid(depth_slam, depth_metric, mask[k])
+s = median(scale)
+t_c2w = s * traj.translation
+R_c2w = quaternion_to_rotation(traj.quaternion)
+T_w2c = inverse(T_c2w)</code></pre>
+    <p><code>est_scale_hybrid</code> 以两个深度场及 mask 估计关键帧尺度；当前入口的 <code>sigma=0.5</code>，初始 near / far 阈值为 0.4 / 0.7，遇 NaN 会放宽区间。片段最终使用关键帧尺度的中位数。这里是“先 SLAM，再通过预测深度恢复尺度”，不是每帧都用 MoGe 深度约束 MegaSAM 的另一条实验路线。文件名出现 <code>moge</code> 也不能替代对实际调用的判断：本 SLAM 函数实例化的是 <code>Metric3D</code>。</p>
+    <p>标准化后的 <code>camera_trajectory.npz</code> 保存 <code>cam_c2w</code>、其逆 <code>cam_w2c</code>、内参和时间映射。平移已乘尺度，后续不能再乘一遍。该尺度是模型估计的公制尺度，不是通过标尺或真值验证过的绝对尺度；如果 Metric3D 在低纹理或特殊场景中产生偏差，整段相机平移会相应偏大或偏小。</p>
+    <p class="source-line">实现：<span class="implementation-ref" title="私有实现：scripts/hawor/hawor_slam.py">hawor_slam.py</span> · <span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/hawor_canonicalize.py">camera canonicalization</span></p>
+  </section>
+
+  <section id="stitch">
+    <h3>2.4 跨片段拼接：相机相似对齐，不是手部联合优化</h3>
+    <p>每段独立 SLAM 都有自己的原点、朝向和尺度。拼接器用 <code>source_frame_indices</code> 找到相邻片段的共同帧，取相机中心对应点，用 SVD / Umeyama 类相似对齐将后片段映射到前片段已经对齐的坐标系。</p>
+    <div class="equation"><span>min<sub>s,R,t</sub> ∑<sub>i∈overlap</sub> ‖c<sub>prev,i</sub> − (s R c<sub>next,i</sub> + t)‖²</span><small>R 为旋转，s 为正尺度，t 为平移。变换后的相机中心 c′ = sRc+t，相机朝向 R′<sub>cam</sub> = R R<sub>cam</sub>。</small></div>
+    <p>对应点先中心化，对交叉协方差做 SVD，求旋转并修正反射；尺度由奇异值和源点方差计算，再由质心差恢复平移。代码是按相邻片段逐段对齐，不是全序列 bundle adjustment，也不是包含手部观测的联合优化。</p>
+    <div class="table-wrap"><table class="compact"><caption>表 4　拼接时的实际选择与退化规则</caption><thead><tr><th>情况</th><th>代码行为</th><th>解释与风险</th></tr></thead><tbody>
+      <tr><td>正常的相机重叠</td><td>估计相似变换，保存尺度与重叠残差</td><td>相机中心匹配好，不代表手部深度一致</td></tr>
+      <tr><td>共同点少于 3 / 源位置方差接近 0</td><td>仅估计平移，R=I、s=1</td><td>无法可靠地从相机中心恢复旋转和尺度</td></tr>
+      <tr><td>没有共同帧</td><td><code>identity_no_overlap</code></td><td>只是返回恒等变换，不能声称两个片段已对齐</td></tr>
+      <tr><td>同帧有多份相机结果</td><td>优先选距 clip 边界更远的候选</td><td>避免边界影响；不是加权平滑融合</td></tr>
+      <tr><td>同帧、同手有多份手部结果</td><td>有效性优先，再比较距边界距离</td><td>保留一个相机系候选；不会自动修复身份错误</td></tr>
+    </tbody></table></div>
+    <p>这里还有一个容易忽略的耦合：相机经过 Sim(3) 缩放，而手部仍是选中的相机系结果。相机平移尺度与手部深度是否一致，需要另行检查；拼接没有共同优化它们。相机中心几乎不动、但头部持续旋转的片段，也不能仅凭位置对齐残差小就认定朝向可信。<code>stitch_report.json</code> 中的 overlap 数、方法、尺度和残差应作为必要的验收证据。</p>
+    <p class="source-line">实现：<span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/stitch_clip_reconstructions.py">stitch_clip_reconstructions.py</span></p>
+  </section>
+
+  <section id="world">
+    <h3>2.5 世界系变换，以及误差如何叠加</h3>
+    <p>世界对齐前，代码要求手与相机的帧号、源帧号一致，时间戳以 <code>rtol=0, atol=1e-6</code> 检查。随后生成或加载手部几何，逐点做刚体变换；腕朝向通过旋转矩阵相乘变换。</p>
+    <div class="equation"><span>p<sub>w,t,h,j</sub> = R<sub>c2w,t</sub> p<sub>c,t,h,j</sub> + t<sub>c2w,t</sub></span><span>R<sub>w,hand</sub> = R<sub>c2w</sub> R<sub>c,hand</sub></span><small>t：时间；h：左 / 右手；j：关节点。episode_world 是本视频的重建世界系，不是所有视频共同的地理或机器人基坐标系。</small></div>
+    <p>这个变换能够补偿相机运动，但不会自动消除输入误差。对小旋转扰动，一阶近似可以写为：</p>
+    <div class="equation"><span>δp<sub>w</sub> ≈ R δp<sub>c</sub> − R[p<sub>c</sub>]<sub>×</sub> δθ + δt</span><small>三项依次是手部重建误差、相机旋转误差引入的位置误差、相机平移 / 尺度误差。它们不是彼此独立的质量保证。</small></div>
+    <p>例如目标距相机约 0.5 m，1° 旋转误差造成的位置偏差量级约为 0.5×π/180 ≈ 8.7 mm，具体取决于误差轴和手的位置；这只是几何敏感性示例，不是实验测量。固定尺度误差、随时间变化的尺度漂移、相机旋转偏差和手部深度偏差会产生不同的伪运动，不能一概归因于“SLAM 不准”。</p>
+    <p>针对“手静止、头在动”的片段，应同时检查世界系手腕残余位移、其与相机运动的相关性、重叠区一致性及重投影。只有重投影贴合仍不足以证明尺度正确：沿同一相机射线的不同深度，可以给出相近的二维投影。</p>
+    <p class="source-line">实现：<span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/hand_to_episode_world.py">hand_to_episode_world.py</span></p>
+  </section>
+
+  <section id="quality">
+    <h3>2.6 质量检查与有限修复：把可运行和可使用分开</h3>
+    <p>QC 不需要真值，检查的是契约、数值和内部一致性。它能发现一部分异常，却不能证明重建在真实世界中准确。推荐流程先生成报告，再尝试有限修复，最后重新检查。</p>
+    <div class="table-wrap"><table><caption>表 5　主要 QC 检查与可解释范围</caption><thead><tr><th>检查</th><th>具体内容</th><th>不能证明什么</th></tr></thead><tbody>
+      <tr><td>时间轴 / 坐标 / 数值</td><td>帧号、时间戳、形状、有限数值、坐标与单位声明</td><td>形状正确不等于每个点的位置准确</td></tr>
+      <tr><td>相机合法性 / 对齐一致性</td><td>相机变换有效；世界手部与相机系输入、变换关系一致</td><td>错误但自洽的相机和手部仍可能通过</td></tr>
+      <tr><td>覆盖率</td><td>至少一手有效的帧比例；0 或 &lt;30% 为 fail；&lt;70% 或连续缺失 ≥30 帧为 warning</td><td>“未检测到”不一定是模型漏检，也可能手确实不在画面</td></tr>
+      <tr><td>运动异常</td><td>位置 / 朝向跳变、异常片段；腕位置阈值含 <code>max(0.30 m, 8×median_delta)</code></td><td>固定阈值不是经过任务验证的精度标准</td></tr>
+    </tbody></table></div>
+    <p>当前 repair 针对 <code>hand_orientation_single_frame_outlier</code>：连续三帧有效，中间帧与两侧差异大、而两侧可连贯衔接时，用相邻两帧的旋转中点替换异常腕朝向。实现保留已有几何，<strong>不是重新优化所有关节</strong>，也不修复长遮挡、手别身份交换或全局深度偏差。</p>
+    <p>推荐 recipe 暂不做 world-space smoothing。原因是现有平滑器可以独立改变对齐后的手腕，而没有同步更新相机变换 / 一致性模型，可能破坏 <code>alignment_consistency</code>。这是当前实现的约束，不是“平滑在原理上不可用”。重新引入时需要把几何与契约一起验证。</p>
+    <p>还有两层 mask 必须分开：导出的 <code>valid_mask</code> 是上游有效性；QC 的 bad-frame / bad-segment 是额外诊断。导出器<strong>不会自动把全部 QC 警告都合并成 invalid</strong>。训练时若需要质量过滤，必须明确规则，并保存过滤前后覆盖率，不能无声地把缺失值补成可信监督。</p>
+    <p class="source-line">实现：<span class="implementation-ref" title="私有实现：src/data_pipeline/steps/qc/reconstruction3d/checks.py">QC checks</span> · <span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/repair_aligned_hand_trajectory.py">orientation repair</span> · <span class="implementation-ref" title="私有实现：scripts/summarize_run.py">最终 disposition</span></p>
+  </section>
+</section>
+
+<section id="evaluation">
+  <h2>3. 如何评估：先固定协议，再讨论“精度”</h2>
+  <p>可视化、QC 和有真值的定量评测回答不同问题。可视化帮助定位现象；QC 检查内部契约；真值评测才估计几何误差。比较两种方法时，还要避免“只留下各自最好的帧”或“用真值对齐抹去最关心的尺度误差”。</p>
+  <h3>3.1 手部：覆盖、位置和手型必须分别报告</h3>
+  <p>记 <em>m</em><sub>t,h</sub> 为预测有效性，<em>g</em><sub>t,h</sub> 为真值可用性。误差通常在预先约定的共同有效集合 V 上计算，覆盖率则必须说明分母：全视频帧、真值可见帧，还是左右手总样本数。只有原始 <code>valid_mask</code> 时，我们报告的是输出覆盖，不是检测召回率。</p>
+  <div class="equation"><span>Coverage<sub>any</sub> = (1/T) ∑<sub>t</sub> 1[m<sub>t,L</sub> ∨ m<sub>t,R</sub>]</span><span>MPJPE = (1 / (21|V|)) ∑<sub>(t,h)∈V</sub> ∑<sub>j=0…20</sub> ‖p̂<sub>t,h,j</sub> − p<sub>t,h,j</sub>‖₂</span><small>MPJPE 的单位、所在坐标系、是否做序列对齐，必须与数值一起记录。帽号表示预测值。</small></div>
+  <p><strong>未根对齐关节误差</strong>同时受手型和整体位置影响；<strong>手腕误差</strong>单独衡量根位置；<strong>root-aligned 误差</strong>先分别减去预测和真值腕点，再比较关节，用于隔离相对手型。它只去平移，不等同于额外拟合旋转和尺度的 Procrustes / PA 指标。将三者放在一起，才能判断主要问题是“整只手放错位置”，还是“指关节形状本身不对”。</p>
+  <p>对长尾错误，至少保留 mean、median、P90、max 和异常片段；对时序，检查身份切换、缺失长度、拼接边界位移以及静止手残余运动。不同方法除共同帧上的误差外，还应同时给出各自覆盖和固定 GT 可见集合上的成功比例，避免低覆盖方法因只输出容易帧而显得更精确。</p>
+  <h3>3.2 相机：SE(3) 与 Sim(3) 不能只留一个</h3>
+  <div class="table-wrap"><table class="compact"><caption>表 6　轨迹对齐方式改变了问题本身</caption><thead><tr><th>评测方式</th><th>允许消除的差异</th><th>适合回答</th></tr></thead><tbody>
+    <tr><td>SE(3) 对齐 ATE</td><td>一个全局旋转和平移，不缩放</td><td>统一原点和朝向后，公制轨迹有多大误差？</td></tr>
+    <tr><td>Sim(3) 对齐 ATE</td><td>全局旋转、平移和尺度</td><td>拟合掉尺度后，轨迹形状有多接近？</td></tr>
+    <tr><td>尺度系数 / 路径长度偏差</td><td>单独保留尺度和累积运动信息</td><td>是否存在尺度偏差、局部抖动或轨迹形状差异？</td></tr>
+    <tr><td>旋转 / 相对位姿误差</td><td>按所选协议检查朝向与局部运动</td><td>是否能可靠补偿转头，局部漂移是否明显？</td></tr>
+  </tbody></table></div>
+  <p class="note">以上是本报告解释和后续比较所需的评测定义。原始报告未附完整逐帧评测程序、坐标对齐及过滤协议，因此下文保留历史指标名称，不把它们追认成已统一协议的正式 benchmark。</p>
+</section>
+
+<section id="cases">
+  <h2>4. 手部重建结果与案例分析</h2>
+  <h3>4.1 整段结果：大部分帧有输出，但长尾误差明显</h3>
+  <p>原报告记录了一段 3,091 帧序列：按 300 帧独立切片、无 overlap 运行 HaWoR。这个配置与本文推荐的 20 s / 1 s 重叠主线不同，不能把它当作新版全部后处理的消融结果。</p>
+  <div class="table-wrap"><table class="numeric"><caption>表 7　历史单序列手部结果；误差单位 mm</caption><thead><tr><th>左手有效对比帧</th><th>右手有效对比帧</th><th>Mean</th><th>Median</th><th>P90</th><th>Max</th></tr></thead><tbody><tr><td>2,843 / 3,091<br>92.0%</td><td>2,805 / 3,091<br>90.7%</td><td>63.0</td><td>60.7</td><td>101.6</td><td>391.4</td></tr></tbody></table></div>
+  <p>约九成的有效对比帧说明模型能够覆盖多数手部观测，但不能说明这些帧都适合训练。最大误差远大于中位数，意味着存在明显的失败尾部。只展示最佳帧会严重高估稳定性；只给平均数又会隐藏失败发生在哪些操作和时间段。</p>
+
+  <h3>4.2 较好案例：可达到较贴合的三维重建，但不是整段性能</h3>
+  <figure>
+    <button class="image-open" data-image="assets/right_hand_good.png" data-caption="历史报告 frame 195：右手平均关节误差 9.1 mm，腕误差 9.8 mm。完整原图，未修改像素或骨架。" aria-label="打开 frame 195 完整原图"><svg viewBox="450 700 850 360" role="img" aria-label="右手较好重建局部，橙色 GT 与红色重建接近"><image href="assets/right_hand_good.png" width="1600" height="1300"/></svg></button>
+    <figcaption>图 2　Frame 195 的局部放大。右手：橙色为 GT，红色为预测；原图中左手为绿色 GT / 品红预测。平均关节误差 9.1 mm，腕部误差 9.8 mm。点击查看完整原图。</figcaption>
+  </figure>
+  <p>这一帧的手型与整体位置均较接近参考，是原报告的右手最佳样例。它说明该模型在部分可见性和观测条件下具备较好的重建能力，而不是证明当前流程具有稳定的毫米级误差。可靠性还取决于这种效果在连续时间上能维持多久、接触与遮挡之后是否恢复正确身份。</p>
+
+  <h3>4.3 失败案例：有骨架且标为有效，仍可能不是可信监督</h3>
+  <figure>
+    <button class="image-open" data-image="assets/right_hand_failure.png" data-caption="历史报告 frame 1908：右手平均关节误差 391.4 mm，腕误差 340.8 mm。单帧不能确定身份、深度或跟踪错误的根因。" aria-label="打开 frame 1908 完整原图"><svg viewBox="450 630 850 360" role="img" aria-label="右手失败案例局部，红色预测与橙色真值存在明显位移"><image href="assets/right_hand_failure.png" width="1600" height="1300"/></svg></button>
+    <figcaption>图 3　Frame 1908 的局部放大，与图 2 使用相同缩放倍率。平均关节误差 391.4 mm，腕部误差 340.8 mm；保留原始错误，不做视觉修饰。</figcaption>
+  </figure>
+  <p>该帧中整只手的位置出现大幅偏离，腕部误差本身已经很大，因此不能只把问题归于指关节形状。原报告还记录了双手接近、遮挡和交互时的 identity 问题，但<strong>这一张截图本身不能证明具体根因</strong>。应回查前后帧的 track / handedness、相机系深度、clip 边界和相机轨迹，区分手部跟踪错误、深度崩坏及世界变换问题。</p>
+  <p>生产处置上，这类帧应进入抽检 / 剔除策略，保留时间段和原因。不应通过简单插值让标注看起来连续，更不能因数组非空就当成合格动作监督。上游 valid 标记未必能覆盖这些严重异常。</p>
+
+  <h3>4.4 深度案例：二维投影贴合，仍可能有厘米级位置偏差</h3>
+  <p>下面是原稿另列的相机系诊断图，标注为 <code>clip_001 / local frame 410 / source frame 980</code>。它与前述 300 帧、无重叠统计是否来自同一运行未得到确认，因此只用于分析这一帧的误差分量，不并入上面的汇总结果。</p>
+  <figure>
+    <button class="image-open" data-image="assets/camera_space_error.png" data-caption="历史报告 source frame 980，完整相机系三维对比图。绿色为 GT，橙色为重建；数值来自原图标注。" aria-label="打开 source frame 980 完整三维对比原图"><img src="assets/depth-error-components.svg" alt="相机系腕位置误差分量，左右手使用共同横轴，深度偏差分别为3.9和9.2厘米" width="900" height="430"></button>
+    <figcaption>图 4　根据 source frame 980 原图标注重绘的误差分量，共同尺度、单位 cm。只使用原图已有的四舍五入数值，未重新计算三维点。点击查看原始三维对比图，其中绿色为 GT、橙色为重建。</figcaption>
+  </figure>
+  <div class="table-wrap"><table class="numeric"><caption>表 8　相机系误差分解，单位 cm；按原图标注四舍五入</caption><thead><tr><th>手</th><th>Δx</th><th>Δy</th><th>Δz（深度）</th><th>腕误差</th><th>关节均值</th></tr></thead><tbody><tr><td>左手</td><td>−0.8</td><td>+0.4</td><td>+3.9</td><td>4.0</td><td>6.0</td></tr><tr><td>右手</td><td>+3.5</td><td>+1.3</td><td>+9.2</td><td>9.9</td><td>10.4</td></tr></tbody></table></div>
+  <p>在这个样例里，z 方向偏差是腕位置误差的主要分量。相机投影近似为 u = f<sub>x</sub>X/Z+c<sub>x</sub>、v = f<sub>y</sub>Y/Z+c<sub>y</sub>；如果 X、Y、Z 按接近相同的比例变化，二维位置可以保持接近。因此 overlay 适合检查可见几何是否对齐，却不能独立验证绝对深度或公制尺度。这个案例支持“需要单独检查深度”，不代表所有场景都由同一误差主导。</p>
+  <p class="source-line">样例来源：提供的原报告及原始 PNG。这里只改变网页显示视窗，未修改图像中的关节、坐标轴或误差数值。</p>
+</section>
+
+<section id="experiments">
+  <h2>5. 相机估计与双目探索：改善了什么，仍缺什么</h2>
+  <h3>5.1 MegaSAM + MoGe：对齐后的低误差不代表原始尺度准确</h3>
+  <p>这是原报告中另一条相机估计路线，测试数据为简智序列，参考为 corrected VIO GT：3,091 帧、约 103 s，300 帧切片、30 帧 overlap。它不是主线 HaWoR-SLAM 的同一次测量，不能将其 ATE 直接用作主线指标。</p>
+  <div class="table-wrap"><table class="numeric"><caption>表 9　相机轨迹结果及尺度信息</caption><thead><tr><th>指标</th><th>结果</th><th>含义</th></tr></thead><tbody>
+    <tr><td>SE(3) 对齐 ATE RMSE</td><td>19.7 mm</td><td>不拟合尺度；来自原图标题</td></tr>
+    <tr><td>Sim(3) 对齐 ATE RMSE / P95 / Max</td><td>5.3 / 9.5 / 12.3 mm</td><td>允许通过 GT 拟合一个尺度</td></tr>
+    <tr><td>Sim(3) 尺度，预测 → GT</td><td>0.6106</td><td>原始尺度约大 63.8%，不是 5.3 mm 可忽略的问题</td></tr>
+    <tr><td>原始路径长度 / GT</td><td>4.047 / 2.280 m</td><td>路径长度偏大约 77.5%</td></tr>
+    <tr><td>Sim(3) 后路径长度偏差</td><td>+8.4%</td><td>拟合尺度后仍有运动形状 / 局部抖动差异</td></tr>
+    <tr><td>该次运行耗时</td><td>938 s</td><td>仅为该实验记录，不是主线吞吐或多卡 benchmark</td></tr>
+  </tbody></table></div>
+  <figure>
+    <button class="image-open" data-image="assets/camera_trajectory_comparison.png" data-caption="原报告 MegaSAM + MoGe 对 corrected VIO GT 的六视图，SE(3) 对齐、未做尺度修正。这里只放大其中 XY 平面。" aria-label="打开相机轨迹完整六视图"><svg viewBox="0 205 960 890" role="img" aria-label="SE3 对齐后 XY 轨迹，蓝色为 corrected VIO GT，橙色为 MegaSAM"><image href="assets/camera_trajectory_comparison.png" width="2880" height="1980"/></svg></button>
+    <figcaption>图 5　原图 XY 轨迹局部放大；蓝色为 corrected VIO GT，橙色为预测。这里没有用 GT 做尺度修正。完整六视图包含 XZ / YZ、逐帧 ATE、路径增量与三维轨迹。</figcaption>
+  </figure>
+  <p>只摘出“Sim(3) ATE = 5.3 mm”会把尺度偏差藏起来。对于后续公制手部动作监督，尺度恰恰是需要保留和验证的量。原报告据效果与资源消耗暂未采用这条替代路线；由于缺少完整同协议的两方法对照表，本文不把定性描述升级为普遍性能排序，也不将该耗时直接外推到不同 GPU 或多机集群。</p>
+
+  <h3>5.2 双目探索：典型误差下降，严重长尾仍未消失</h3>
+  <p>原报告还比较了单目 HaWoR 与 <strong>WiLoR full + 2D/3D window MANO fitting</strong>。双目提供额外视角与几何约束，有机会减轻单目深度歧义，但依赖相机同步、标定及跨视角对应。下面保留该组自身的基线，不与上一节单序列结果混算。</p>
+  <div class="table-wrap"><table class="numeric"><caption>表 10　原报告双目探索；三维误差 mm，重投影误差 px</caption><thead><tr><th>方法</th><th>Joint median</th><th>Joint RMSE</th><th>Wrist median</th><th>Wrist RMSE</th><th>Cam 2 / 3 reproj. median</th></tr></thead><tbody><tr><td>单目 HaWoR</td><td>52.6</td><td>66.2</td><td>48.7</td><td>62.0</td><td>15.14 / 16.43</td></tr><tr><td>双目 WiLoR + fitting</td><td>24.9</td><td>54.0</td><td>24.0</td><td>51.5</td><td>12.32 / 11.99</td></tr></tbody></table></div>
+  <p>关节中位数下降约 52.7%，RMSE 只下降约 18.4%。这符合“多数帧改善，但大误差样本仍然存在”的解释，不能声称双目已经解决全部问题。原报告未附完整共同帧评测协议，因此该结论仍限于这组历史记录。</p>
+  <p>仓库中的 <code>hand_reconstruction.stereo_hawor</code> 是另一实现：左右目各跑 HaWoR，再使用双目标定做坐标融合。它与这里的 WiLoR + window fitting 不是同一方法，不能借用本表数字作为该模块的实测精度。当前推荐单目 recipe 也没有启用这条双目支路。</p>
+</section>
+
+<section id="production">
+  <h2>6. 实际标注产物：以 CaptainCook4D 为例</h2>
+  <p>为了把方法说明落到真实输出，我们回查了两份既有 CaptainCook4D NPZ 及其 QC 报告。下表的比例由 <code>valid_mask</code> 统计，分母是各自完整的导出时间轴。它们是文件覆盖情况，不是与真值比较后的准确率，也不能用于估计全数据集完成率。</p>
+  <div class="table-wrap"><table class="numeric"><caption>表 11　2026-08-11 产物；2026-09-19 回查</caption><thead><tr><th>Episode</th><th>帧数</th><th>左手有效</th><th>右手有效</th><th>任一手有效</th><th>双手有效</th><th>最终 QC</th></tr></thead><tbody><tr><td><code>10_50</code></td><td>7,580</td><td>88.0%</td><td>84.8%</td><td>96.9%</td><td>75.9%</td><td>warning</td></tr><tr><td><code>12_43</code></td><td>6,005</td><td>37.1%</td><td>57.3%</td><td>65.9%</td><td>28.4%</td><td>warning</td></tr></tbody></table></div>
+  <figure class="coverage-figure"><div id="coverage-tracks"></div><noscript><p>逐帧时间带需要 JavaScript；完整统计见上表及 production-summary.json。</p></noscript><figcaption>图 6　由原始 valid_mask 的连续有效区间绘制，未插值、未叠加 QC 过滤。实色为有输出、浅灰为无效。两段各自铺满宽度，横轴是各自源结果的帧位置，不能直接比较条带的绝对持续时间。</figcaption></figure>
+  <p><code>10_50</code> 的“任一手有效”达到 96.9%，但双手同时有效只有 75.9%，其 QC 仍记录 9 个坏片段、11 个坏帧标记。<code>12_43</code> 任一手有效为 65.9%，双手同时有效降至 28.4%，报告记录 19 个坏片段、20 个坏帧标记。若下游任务依赖双手协作，只看任一手覆盖会明显高估可用监督。</p>
+  <p>两份产物的时间对齐、坐标 / 数值、相机合法性和对齐一致性检查通过，但这只验证内部契约。其中还存在可选 episode 级内参资产缺失的 warning，不能据此反推整条推理从未用过 K。最终均应进入 <code>review</code>，结合原视频和异常区间抽检，而不是因为 NPZ 结构完整就直接标记为验收通过。</p>
+  <p class="source-line">本地页面数据：<a href="assets/production-summary.json">回查摘要 JSON</a> · <a href="assets/production-data.js">原始 valid-mask 连续区间</a>。这些是历史产物快照，不是实时任务监控。</p>
+</section>
+
+<section id="delivery">
+  <h2>7. 输出格式与交付契约</h2>
+  <p>最终 exporter 将手优先的 <code>(2,T,21,3)</code> 转成时间优先的 <code>(T,2,21,3)</code>，要求输入处于 <code>episode_world</code>，并检查形状和有限数值。最终 NPZ 的主内容是关节轨迹，不是 MANO 全部中间状态；MANO、相机轨迹、拼接和 QC 记录应作为可追溯的配套资产保留。</p>
+  <div class="table-wrap"><table><caption>表 12　<code>hand_joints_3d.npz</code> 字段定义</caption><thead><tr><th>字段</th><th>Shape / dtype</th><th>语义</th></tr></thead><tbody>
+    <tr><td><code>joints_3d</code></td><td><code>(T,2,21,3)</code> / float32</td><td>每帧、每手、21 关节点的 xyz，单位米</td></tr>
+    <tr><td><code>valid_mask</code></td><td><code>(T,2)</code> / bool</td><td>逐帧逐手有效性；无效帧不应仅按数组数值解释</td></tr>
+    <tr><td><code>validity_source</code></td><td><code>(T,2)</code> / Unicode</td><td>例如 original / repaired / invalid；不是置信度分数</td></tr>
+    <tr><td><code>handedness</code></td><td><code>(2,)</code> / Unicode</td><td>手别；读取此字段，不盲目假定下标语义</td></tr>
+    <tr><td><code>joint_names</code></td><td><code>(21,)</code> / Unicode</td><td>按 OpenPose-21 排列的关节名称</td></tr>
+    <tr><td><code>frame_indices</code></td><td><code>(T,)</code> / int32</td><td>重建结果的 episode 帧索引</td></tr>
+    <tr><td><code>source_frame_indices</code></td><td><code>(T,)</code> / int32</td><td>用于回查源视频的帧索引</td></tr>
+    <tr><td><code>timestamps</code></td><td><code>(T,)</code> / float32</td><td>秒；原点依据导入与帧映射，与语言区间对齐时须核对</td></tr>
+    <tr><td><code>joint_convention</code></td><td>scalar / Unicode</td><td><code>openpose_21</code></td></tr>
+    <tr><td><code>coordinate_frame</code> / <code>units</code></td><td>scalar / Unicode</td><td><code>episode_world</code> / <code>m</code></td></tr>
+    <tr><td><code>source_asset_type</code></td><td>scalar / Unicode</td><td><code>aligned_hand_trajectory</code></td></tr>
+    <tr><td><code>source_joint_layout</code></td><td>scalar / Unicode</td><td>上游布局 <code>(2,T,21,3)</code></td></tr>
+  </tbody></table></div>
+  <p>21 点顺序：腕点；拇指 CMC / MCP / IP / TIP；其余四指依次为 MCP / PIP / DIP / TIP。不同数据集原生的 21 点或 26 点不一定具有相同顺序，不能只检查点数相同就直接拼接。</p>
+  <h3>7.1 交给同事的最小包是什么？</h3>
+  <pre><code>processed_data/&lt;dataset&gt;/
+└── hand_asset/
+    ├── &lt;video_id&gt;.npz           # 与视频同名，或提供明确映射
+    └── ...
+
+交付说明（随包提供）：
+  video_id ↔ source_id ↔ episode_id；源视频 / 版本 / 帧映射
+  NPZ 字段、单位、坐标系、手别与关节顺序
+  每段 QC 状态、bad-frame / bad-segment、有效性过滤规则
+  recipe / 代码 / 模型版本；1–2 个可回查样例</code></pre>
+  <p>生产内部文件仍按 <code>&lt;artifact_root&gt;/&lt;episode_id&gt;/episode/export.hand_joints_3d/&lt;run_id&gt;/hand_joints_3d.npz</code> 保存。发布时需选择 manifest 当前引用的已核验产物，不能把目录里所有历史运行的同名文件都混入交付。先给同事 1–2 个样例和字段表确认 converter，再批量交付；不覆盖来源不明的现有标注。</p>
+  <h3>7.2 从手部轨迹到训练 action 还差什么？</h3>
+  <p>converter 仍需决定：以哪个坐标系表达动作、使用绝对位置还是相对增量、预测多长的未来窗口、怎样采样和重对齐视频、怎样处理无效帧，以及怎样把已有 subtask 接到对应区间。选择腕位姿、指关节还是手型参数作为监督，也是训练协议的一部分，不由 NPZ 文件扩展名决定。</p>
+  <p>因此“已经导出关节轨迹”与“已经是机器人可执行 action”之间仍有表示和任务定义的差别。这里不凭空给出固定 action 维度，也不声称已经完成 LeRobot / Motus 格式转换。几何文件、converter 兼容性、训练收益是三个独立验收点。</p>
+  <p class="source-line">实现：<span class="implementation-ref" title="私有实现：src/data_pipeline/steps/reconstruction3d/export_hand_joints_3d.py">exporter</span> · <span class="implementation-ref" title="私有实现：docs/OUTPUT_SCHEMA.md">输出契约</span> · <a href="assets/output-contract.json" download>下载字段契约 JSON</a></p>
+</section>
+
+<section id="running">
+  <h2>8. 如何使用，以及如何并行</h2>
+  <p>以下是入口说明，不是此次已经执行的标注任务。应在已安装模型环境和权重的机器上运行，先用一个短样例检查输入、相机 profile、导出和 QC，再扩展到批量。原视频、权重、cache 与 artifacts 应放持久数据盘；路径必须替换为实际挂载，不能只凭目录名字认定其会跨容器保留。</p>
+  <h3>8.1 单视频：导入 → 检查计划 → 执行 → 汇总</h3>
+  <p>开始前检查：视频可完整解码；FPS / 分辨率与 K 匹配；畸变状态明确；profile 已准备；HaWoR、MANO、SLAM 和 Metric3D 权重及 CUDA 扩展可用。推荐 recipe 的 <code>dataset_profile</code> 步骤不等于给任意未标定视频自动完成标定。</p>
+  <div class="code-block"><button data-copy="run-example">复制示例</button><pre><code id="run-example"># 在已配置的 hawor 环境中；所有 /path/to/... 都需要替换
+cd /path/to/Ego-data--pipeline
+export PYTHONPATH="$PWD/src"
+RUN_ROOT=/path/to/persistent/annotation_demo
+
+python -m data_pipeline.cli import-ego-video \
+  --video /path/to/video/demo_001.mp4 \
+  --episode-id demo_001 --dataset-name demo_dataset \
+  --output "$RUN_ROOT/episodes/demo_001/episode.yaml"
+
+# 相机 profile 必须已准备且和实际帧一致；先查看步骤依赖
+python -m data_pipeline.cli run-recipe \
+  --recipe recipes/ego_hand_annotation_v1.yaml \
+  --episode "$RUN_ROOT/episodes/demo_001/episode.yaml" \
+  --artifact-root "$RUN_ROOT/artifacts" --dry-run
+
+# 确认计划与环境后再实际运行
+CUDA_VISIBLE_DEVICES=0 python -m data_pipeline.cli run-recipe \
+  --recipe recipes/ego_hand_annotation_v1.yaml \
+  --episode "$RUN_ROOT/episodes/demo_001/episode.yaml" \
+  --artifact-root "$RUN_ROOT/artifacts" --workers 4 --gpu-workers 1
+
+python scripts/summarize_run.py \
+  --episodes-root "$RUN_ROOT/episodes" \
+  --artifact-root "$RUN_ROOT/artifacts" \
+  --output "$RUN_ROOT/qc_summary.tsv"</code></pre></div>
+  <p>profile 可通过已配置的数据集准备入口 <code>prepare-dataset-profiles</code> 生成；该命令需要真实相机配置 / 标定来源，并非零输入标定器。共享 profile 应在批量启动前串行准备。恢复任务时保留 manifest 和输入引用，检查哪些步骤复用、哪些重跑；磁盘里存在某个 NPZ 并不能独立证明流程已完成。</p>
+  <div class="table-wrap"><table class="compact"><caption>表 13　汇总脚本的处置含义</caption><thead><tr><th>状态</th><th>条件</th><th>使用方式</th></tr></thead><tbody><tr><td><code>accepted</code></td><td>最终 QC pass，NPZ 结构校验通过</td><td>进入后续数据验收；仍非 GT 精度认证</td></tr><tr><td><code>review</code></td><td>QC warning，NPZ 可读且结构正确</td><td>结合异常原因和视频抽检</td></tr><tr><td><code>rejected</code></td><td>QC fail / 缺失，或 NPZ 非法</td><td>定位失败阶段并返工，不能当合格训练数据</td></tr></tbody></table></div>
+  <h3>8.2 多卡 / 多机：按 episode 分片，而不是直接加线程数</h3>
+  <p>推荐一个 GPU worker 固定一个 <code>CUDA_VISIBLE_DEVICES</code>，按互不重复的 episode 队列运行。同一个 episode 的 manifest 只能有一个 writer，不能让两台机器同时修改同一份 <code>episode.yaml</code>。本仓库的 <code>scripts/run_four_gpu.sh</code> 读取 <code>schedules/gpu_0.txt</code> 等队列，并为 episode 加锁。</p>
+  <p><code>--workers</code> 是调度并发参数，<code>--gpu-workers</code> 限制 GPU 类任务数量，<strong>都不自动把外部进程均匀分配到不同物理 GPU</strong>。仅把后者改成 4，可能让四个 HaWoR 进程挤在同一张卡。多机也应划分不重叠队列，统一数据版本、持久路径和锁 / 完成状态，而不是共同扫描后各自抢跑。</p>
+  <p>HaWoR 推理、SLAM 和深度估计都消耗 GPU，但吞吐还可能受视频解码、CPU、模型初始化和共享存储限制。多卡主要增加独立视频的吞吐，不保证单视频延迟线性下降。估算时间应先量一个代表性批次的端到端速度与失败率，再用“剩余视频时长 × 实测计算倍率 ÷ 实际并发利用率”估算；不能用上节 MegaSAM 的单次耗时替代当前主线实测。</p>
+  <p class="source-line">入口：<span class="implementation-ref" title="私有实现：README.md">仓库使用文档</span> · <span class="implementation-ref" title="私有实现：scripts/run_four_gpu.sh">四卡 launcher</span> · <span class="implementation-ref" title="私有实现：src/data_pipeline/dataset/profile_prepare.py">profile 准备</span> · <span class="implementation-ref" title="私有实现：docs/SUBMODULES.md">依赖与 submodule</span></p>
+</section>
+
+<section id="conclusion">
+  <h2>9. 结论：已有可交付链路，尚无更高精度的证明</h2>
+  <p>当前系统已经具备把第一视角视频转换为标准化世界系手部资产的工程链路。其主要价值是把模型输出接入可解释、可恢复、可对齐的数据处理系统，而不是提出一个已经验证优于 HaWoR 的新重建模型。历史记录说明多数帧能够得到手部结果，但位置 / 深度误差、身份与时序失效以及相机尺度仍是关键限制。</p>
+  <p>对于“是否足够用于训练”，需要在现有 converter 上固定表示与过滤协议，再用受控训练实验回答。对于“是否优于 HaWoR / VITRA”，需要以下同口径比较；目前没有这组结果，不能用可视化观感或工程完成度代替。</p>
+  <div class="table-wrap"><table><caption>表 14　建议的最小验证，均为待执行方案</caption><thead><tr><th>要回答的问题</th><th>保持不变 / 改变的因素</th><th>必要报告</th></tr></thead><tbody>
+    <tr><td>切片与拼接是否引入误差？</td><td>固定视频、模型、内参；比较整段、无重叠、重叠拼接</td><td>同帧关节误差、覆盖、边界跳变、overlap 残差及耗时</td></tr>
+    <tr><td>误差主要来自手还是相机？</td><td>在有 GT 的子集固定手部，替换预测 / GT 相机；固定相机检查手部</td><td>相机系与世界系关节误差、腕误差、root-aligned 误差</td></tr>
+    <tr><td>QC 能筛掉真实坏例吗？</td><td>盲抽 warning 与 pass 片段，固定人工判断规则</td><td>误报 / 漏报、过滤前后覆盖及误差，不能只报筛后效果</td></tr>
+    <tr><td>是否比基础方法准确？</td><td>固定样本、权重、标定、帧映射和评测协议</td><td>HaWoR 基线 / 当前流程 / 可复现对照；同时报告覆盖与误差分布</td></tr>
+    <tr><td>对训练是否真正有帮助？</td><td>固定模型、预算、评测；比较加入补标数据与未加入</td><td>同设置下游结果、数据过滤与动作表示，不从几何指标直接推断</td></tr>
+  </tbody></table></div>
+  <p><strong>当前最稳妥的交付结论：</strong>可以交付可追溯的几何标注和待审样例，不能把它们称作逐帧真值；可以开展 converter 对接和小规模使用验证，不能宣称全量数据已合格或精度已超过现有方法。</p>
+</section>
+
+<section id="references">
+  <h2>实现与资料索引</h2>
+  <ol class="references">
+    <li>私有实现 Ego-data--pipeline，代码基线 <code>3c58fd2</code>。本文的实现引用为模块名称，并非公开源码链接。本仓库仅发布技术报告与展示素材；运行示例需要私有实现的访问权限。当前报告不代表历史实验使用完全相同的版本。</li>
+    <li>用户提供的《3D 手部轨迹重建》报告及图片附件。本文重新组织文字与图像视窗，保留原始实验数据；<a href="assets/measurements.json">历史测量及口径 JSON</a>。不完整的历史评测协议已在相应章节标注。</li>
+    <li>CaptainCook4D 既有产物回查：<a href="assets/production-summary.json">两份导出与 QC 摘要</a>。快照日期见第 6 节，不代表实时任务状态。</li>
+    <li><a href="https://hawor-project.github.io/">HaWoR 官方项目页</a>及<a href="https://github.com/ThunderVVV/HaWoR">官方仓库</a>。当前使用的 submodule 基线为 <code>66c7d410</code>；实际入口与跳过的步骤见第 2 节。</li>
+    <li><a href="https://microsoft.github.io/VITRA/">VITRA 官方项目页</a>。用于说明完整 VLA 数据链路与本项目几何补标的范围差异，不据此作精度排名。</li>
+    <li>版式参考 <a href="https://www.shuai-zhou.com/egoant-report/?lang=en">EgoANT 技术报告</a>的侧栏目录与连续正文形式；本文的方法描述、案例和数字来自上述独立材料。</li>
+  </ol>
+  <footer>纯静态中文报告 · 核心正文不折叠 · 原图可放大 · 可由 GitHub Pages 托管<br>本页未包含登录信息、内部服务器路径、模型权重或原始视频。公开发布前仍须确认图像与数据展示许可。</footer>
+</section>
+
+</main></div>
+<dialog id="image-dialog" aria-labelledby="dialog-caption"><div class="dialog-toolbar"><p id="dialog-caption"></p><a id="original-link" target="_blank" rel="noopener">原始文件 ↗</a><button id="zoom-out" aria-label="缩小">−</button><button id="zoom-in" aria-label="放大">＋</button><button id="zoom-reset">适应窗口</button><button id="close-dialog" aria-label="关闭图片">关闭 ×</button></div><div class="dialog-image-area"><img id="dialog-image" alt=""></div></dialog>
+<div class="toast" role="status" aria-live="polite"></div>
+</body></html>

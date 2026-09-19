@@ -1,0 +1,27 @@
+{
+  "description": "Exporter contract verified at 3c58fd2. Geometry asset, not robot action.",
+  "coordinate_frame": "episode_world",
+  "units": "m",
+  "joint_convention": "openpose_21",
+  "fields": {
+    "joints_3d": {"shape": ["T", 2, 21, 3], "dtype": "float32"},
+    "valid_mask": {"shape": ["T", 2], "dtype": "bool"},
+    "validity_source": {"shape": ["T", 2], "dtype": "Unicode"},
+    "handedness": {"shape": [2], "dtype": "Unicode"},
+    "joint_names": {"shape": [21], "dtype": "Unicode"},
+    "joint_convention": {"shape": [], "dtype": "Unicode"},
+    "coordinate_frame": {"shape": [], "dtype": "Unicode"},
+    "units": {"shape": [], "dtype": "Unicode"},
+    "frame_indices": {"shape": ["T"], "dtype": "int32"},
+    "source_frame_indices": {"shape": ["T"], "dtype": "int32"},
+    "timestamps": {"shape": ["T"], "dtype": "float32"},
+    "source_asset_type": {"shape": [], "dtype": "Unicode"},
+    "source_joint_layout": {"shape": [], "dtype": "Unicode"}
+  },
+  "joint_names": ["wrist", "thumb_cmc", "thumb_mcp", "thumb_ip", "thumb_tip", "index_mcp", "index_pip", "index_dip", "index_tip", "middle_mcp", "middle_pip", "middle_dip", "middle_tip", "ring_mcp", "ring_pip", "ring_dip", "ring_tip", "pinky_mcp", "pinky_pip", "pinky_dip", "pinky_tip"],
+  "cautions": [
+    "QC bad-frame filtering is separate from the exported valid_mask.",
+    "Metric scale is estimated, not verified ground truth.",
+    "Check handedness and original-video time mapping before training."
+  ]
+}
