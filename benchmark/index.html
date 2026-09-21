@@ -36,7 +36,7 @@
   <h1>第一视角手部重建：<br>跨数据集测评与采集方案</h1>
   <p class="subtitle">MINT · ACE-Ego-Hand · HaWoR · OLA 手部标注管线</p>
   <p class="byline">实验与报告：2026-09-20—21 · 最后证据快照 <time>2026-09-21 10:37:28（UTC+8）</time><br>研究用途的固定结果汇报 · 不是实时任务监控或官方排行榜</p>
-  <div class="actions"><a href="SUMMARY.md">5 分钟汇报提纲</a><a href="assets/results.json">下载测量结果 JSON</a><a href="README.md">复核与构建说明</a><button id="print-report" type="button">打印 / 存为 PDF</button></div>
+  <div class="actions"><a href="../explorer/">全量案例 / 视频浏览器 ↗</a><a href="SUMMARY.md">5 分钟汇报提纲</a><a href="assets/results.json">下载测量结果 JSON</a><a href="README.md">复核与构建说明</a><button id="print-report" type="button">打印 / 存为 PDF</button></div>
   <p>本次工作的目标不是给模型排一个单一名次，而是回答一个数据生产问题：<strong>我们要从真实第一视角视频中获得可用的手部动作监督，应该选择什么估计器、怎样接入已有管线、还需要采集哪些约束？</strong>因此，精度、输出覆盖、流程稳定性、工程成本和交付可追溯性必须同时衡量。</p>
   <div class="summary"><h2>可以带到组会的五个结论</h2><ol>
     <li><strong>没有跨数据域、跨指标都最好的方法。</strong>ACE K-given 在 Ego-Exo4D 共同集的相机系误差为 91.05 mm，低于 MINT 的 131.10 mm；但在 SHOW3D 共同集上是 98.77 vs 82.58 mm，方向反转。手形误差和绝对位置误差也不总是一致。</li>

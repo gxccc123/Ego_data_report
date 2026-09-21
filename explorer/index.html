@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>全量测评浏览器 · Ego Data Report</title>
+  <link rel="icon" href="data:,">
+  <meta name="description" content="逐数据集、逐片段、逐方法浏览第一视角手部重建实验：结果、失败、视频、诊断与实验版本。">
+  <link rel="stylesheet" href="explorer.css"><script src="explorer.js" defer></script>
+</head>
+<body>
+<header><nav><a class="brand" href="../">Ego Data Report</a><div><a href="../benchmark/">总结与方法论</a><a href="https://github.com/gxccc123/Ego_data_report/tree/main/explorer">源码 ↗</a></div></nav></header>
+<main>
+  <section class="intro">
+    <p class="eyebrow">EXPERIMENT ARCHIVE / 逐条实验档案</p>
+    <h1>每个数据集。每个案例。<br>每一次实验的结果。</h1>
+    <p class="lead">MINT、ACE-Ego-Hand、HaWoR 与 OLA 的跨数据集测评。这里展示全部已归档记录，不仅是精选成功案例；原总结报告保留在独立页面。</p>
+    <p id="snapshot" class="muted">正在加载经过脱敏的结果索引…</p>
+    <div id="totals" class="totals" aria-live="polite"></div>
+    <p class="note">这是冻结的研究快照，不是实时任务看板或官方榜单。不同协议、输入版本和真值来源不能混排成一个总分；手部出现率不等于准确率。“未评分”与“失败”均保留，不填零分。</p>
+    <div class="links"><a href="#browse">浏览全部案例 ↓</a><a href="#guide">如何读这些指标</a><a href="data/index.json" download>下载案例索引</a><a href="README.md">归档范围与复现</a></div>
+  </section>
+
+  <section aria-labelledby="datasets-title">
+    <div class="section-heading"><h2 id="datasets-title">数据集目录</h2><span class="muted">点击筛选；子集与版本在每条记录中保留</span></div>
+    <div id="datasets" class="datasets"></div>
+  </section>
+
+  <section id="browse">
+    <div class="section-heading"><h2>案例浏览</h2><button id="reset" type="button">清空筛选</button></div>
+    <form id="filters" class="filters" role="search">
+      <label class="search">搜索 ID / 活动 / 子集<input id="query" type="search" placeholder="例如 pouring、gloved、CaptainCook…" autocomplete="off"></label>
+      <label>数据集<select id="dataset"><option value="">全部数据集</option></select></label>
+      <label>方法<select id="method"><option value="">全部方法</option></select></label>
+      <label>结果类型<select id="status"><option value="">全部（含失败）</option><option value="video">有公开视频</option><option value="reference">有参考评分</option><option value="failure">存在失败 / 校验问题</option><option value="notrun">仅准备 / 尚无推理</option></select></label>
+      <label>排序<select id="sort"><option value="media">可视化多的在前</option><option value="dataset">数据集 / ID</option><option value="runs">实验版本多的在前</option></select></label>
+    </form>
+    <p id="match-count" class="muted" aria-live="polite"></p>
+    <section id="detail" class="detail" hidden tabindex="-1" aria-label="案例详情"></section>
+    <div id="cases" class="cases"></div>
+    <div class="pagination"><button id="prev" type="button">← 上一页</button><span id="page-count" aria-live="polite"></span><button id="next" type="button">下一页 →</button></div>
+  </section>
+
+  <section id="guide" class="guide">
+    <h2>读数之前，先确认比较的是什么</h2>
+    <div class="guide-grid">
+      <article><h3>01 · 参考 ≠ 一律是真值</h3><p>Ego-Exo4D 使用稀疏手工标注协议；SHOW3D 使用本次下载的 v2 单目追踪参考；EgoDex 的手腕 proxy 不是完整手指真值。没有独立手部参考的场景仅报告运行、几何与时序诊断。训练集完全不重叠未被普遍证实。</p></article>
+      <article><h3>02 · 误差要和覆盖一起看</h3><p>带 <code>TP</code> 的误差只统计该方法检测到且参考有效的点。不同方法的 TP 集合可能不同，不能据此直接排名。全参考 PCK 的分母包含漏检。严格配对的聚合比较见<a href="../benchmark/">总结报告</a>。</p></article>
+      <article><h3>03 · 运行成功 ≠ 数值有效</h3><p>脚本退出成功、输出文件存在、几何有限、可评分，是不同状态。完整 HaWoR 的原始输出和补全后结果单独保留；NaN 失败不会因为进程返回成功被隐藏。</p></article>
+      <article><h3>04 · 视频与时间线</h3><p>视频中的模型叠加使用对应分支的预测 / 有效内参，不是独立的 2D 重投影精度证明。左右手色块是模型输出的出现比例；深度是相机坐标的手腕 Z 值。均非参考召回率或世界坐标运动。</p></article>
+    </div>
+    <details><summary>指标名称、单位与适用条件</summary><div class="table-wrap"><table><thead><tr><th>指标</th><th>含义</th><th>注意</th></tr></thead><tbody>
+      <tr><td>camera MPJPE / wrist error · mm</td><td>相机坐标下的关节 / 手腕位置误差</td><td>依赖坐标、尺度、内参与有效掩码</td></tr>
+      <tr><td>root-relative MPJPE · mm</td><td>去除手腕平移后的手部姿态误差</td><td>不能说明手在空间里定位准确</td></tr>
+      <tr><td>PA-MPJPE · mm</td><td>Procrustes 对齐后的形状误差</td><td>对齐会消除一部分尺度 / 姿态误差</td></tr>
+      <tr><td>coverage / recall · %</td><td>参考有效手帧中被预测覆盖的比例</td><td>不同于纯预测 presence</td></tr>
+      <tr><td>PCK @ 50 mm · %</td><td>全参考点中误差小于阈值的比例</td><td>本页保留 allGT / all_reference 的原始协议名</td></tr>
+      <tr><td>ATE / RPE · mm / deg</td><td>相机轨迹绝对误差 / 相邻步相对误差</td><td>SE3 固定尺度与 Sim3 重缩放必须区分</td></tr>
+      <tr><td>HOT3D: FAcc / Recall / F1</td><td>0–1 比例</td><td>原记录不改成百分制</td></tr>
+      <tr><td>HOT3D: CT-p / GO-p / Jitter</td><td>分别保留原协议单位 m / deg / mm·frame⁻²</td><td>Jitter 是二阶有限差分，不是加速度误差；不与普通 MPJPE 混用</td></tr>
+      <tr><td>时间 · s / 显存 · GiB</td><td>原实验计时范围内的耗时和显存</td><td>冷启动、解码、前向、后处理范围不同，不直接混排 FPS</td></tr>
+    </tbody></table></div></details>
+    <details id="inventory"><summary>全部实验目录与可追溯性</summary><p>解码目录属于原推理的后处理，不算一次新的模型推理。失败重跑、试运行、旧协议均保留。文件 SHA-256 可供对照本地原始日志。</p><div id="run-list" class="table-wrap"></div><p><a href="data/provenance.json" download>下载实验目录、manifest 与来源文件哈希</a></p></details>
+    <details><summary>公开素材边界与署名</summary><p>SHOW3D、EgoTactile 与 Open-AoE 的预览按其数据许可和研究用途保留署名。其余来源先公开逐案例数值、诊断和实验记录；原 RGB 仍在受控存储，不把“能下载”当成“可重新公开”。不发布权重、MANO 模型或完整源数据。</p><p><a href="ATTRIBUTION.md">完整素材来源及变换说明</a> · <a href="licenses/OpenAoE.txt">Open-AoE 数据许可</a> · <a href="https://creativecommons.org/licenses/by-nc/4.0/">CC BY-NC 4.0</a></p></details>
+  </section>
+</main>
+<footer>独立实验档案 · <a href="../benchmark/">返回研究汇报</a> · 结果以归档快照为准，非生产标注进度。</footer>
+</body>
+</html>
