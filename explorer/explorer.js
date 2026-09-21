@@ -68,6 +68,7 @@ function applyFilters(resetPage=true){
   });
   const sort=$('#sort').value;
   filtered.sort((a,b)=> (sort==='media'?b.videos-a.videos:sort==='runs'?b.attempts-a.attempts:0)||a.family.localeCompare(b.family)||a.id.localeCompare(b.id));
+  if(selected&&!filtered.some(c=>c.id===selected))closeCase();
   document.querySelectorAll('[data-dataset]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.dataset===dataset));
   $('#match-count').textContent=`匹配 ${filtered.length} / ${archive.cases.length} 条案例。卡片合并同 ID 的实验版本，详细记录与分母在案例内查看。`;
   renderCards(); updateURL();
